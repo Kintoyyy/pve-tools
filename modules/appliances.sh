@@ -321,7 +321,12 @@ appl_import_iso() {
 }
 
 appl_execute() {
-  local archive="$APPL_CACHE/$A_ID-$A_VERSION-${A_URL##*/}"
+  # Key the cache on the URL, not just the file name: the official and elseif
+  # CHR downloads are both chr-<v>.img.zip, and reusing the official one (ext2
+  # boot partition, no EFI loader) under OVMF leaves no bootable device.
+  local key archive
+  key=$(printf '%s' "$A_URL" | md5sum | cut -c1-8)
+  archive="$APPL_CACHE/$A_ID-$A_VERSION-$key-${A_URL##*/}"
 
   msg_title "Download ${A_URL##*/}"
   if [[ -s $archive ]]; then
