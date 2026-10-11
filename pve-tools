@@ -73,7 +73,7 @@ main_menu() {
     choice=$(ui_menu "Main menu" "Choose a category:" \
       postinstall "Post-install setup (repos, nag, upgrade)" \
       guests      "VM / LXC management" \
-      appliances  "Appliance installers (MikroTik CHR, KiTifi, WiFi5)" \
+      appliances  "Appliance installers (MikroTik, KiTifi, WiFi5, OpenWrt)" \
       backup      "Backups & snapshots" \
       maint       "System maintenance" \
       passthrough "PCIe passthrough (IOMMU / VFIO)" \

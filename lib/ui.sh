@@ -61,6 +61,12 @@ ui_input() {
   _wt --title "$1" --inputbox "$2" 10 "$UI_W" "${3:-}" 3>&1 1>&2 2>&3
 }
 
+# ui_password <title> <text> — like ui_input, but the typing is hidden.
+ui_password() {
+  _ui_size
+  _wt --title "$1" --passwordbox "$2" 10 "$UI_W" 3>&1 1>&2 2>&3
+}
+
 ui_msg() {
   _ui_size
   _wt --title "$1" --msgbox "$2" "$(_ui_text_h "$2")" "$UI_W" >/dev/tty

@@ -1,6 +1,6 @@
 # pve-tools
 
-A Bash toolkit for Proxmox VE hosts with a whiptail TUI. It covers post-install setup, VM/LXC management, appliance VM installers, backups and snapshots, PCIe passthrough, and routine maintenance. It supports **Proxmox VE 7, 8 and 9**.
+A Bash toolkit for Proxmox VE hosts with a whiptail TUI. It covers post-install setup, VM/LXC management, appliance installers (VMs and an OpenWrt container), backups and snapshots, PCIe passthrough, and routine maintenance. It supports **Proxmox VE 7, 8 and 9**.
 
 ## Install
 
@@ -55,8 +55,9 @@ Each installer downloads a vendor disk image and builds a ready-to-run VM from i
 | MikroTik RouterOS CHR | Official `download.mikrotik.com` image. The stable, long-term and testing versions are looked up live. | SeaBIOS, serial console, 8G disk, converted to a template |
 | KiTifi | Controller v2.0/v2.2 (MikroTik-based) or Standalone v1.3/v2.1/v2.2-beta (OpenWrt-based) | UEFI. 128G disk for the controller, 8G for standalone |
 | WiFi5 Soft vendo | Version list read live from `files.wifi5-soft.com`. Defaults to the newest non-rc release. | UEFI, 2 NICs, 128G disk, start at boot, started when done |
+| OpenWrt (LXC) | x86-64 rootfs from `downloads.openwrt.org`. The newest release of each recent series is looked up live, plus the daily snapshot. | Unprivileged container with nesting, 256 MB, 2 cores, 0.5G rootfs. WAN on eth0 (DHCP), LAN on eth1 (static, 192.168.0.1/24). Optional root password. LuCI comes with releases and is installed from the feed for snapshots |
 
-All VMs use `virtio-scsi-single` with `iothread` and `discard`, `cpu host`, and virtio NICs. UEFI images get an EFI disk without pre-enrolled Secure Boot keys, so the unsigned images can boot. Downloads are cached in `/var/cache/pve-tools/images`, and the cache can be cleared from the menu. Requires PVE 7.2 or newer, for `import-from`.
+All VMs use `virtio-scsi-single` with `iothread` and `discard`, `cpu host`, and virtio NICs. UEFI images get an EFI disk without pre-enrolled Secure Boot keys, so the unsigned images can boot. Downloads are cached in `/var/cache/pve-tools/images`, and the cache can be cleared from the menu. The VM installers require PVE 7.2 or newer, for `import-from`. OpenWrt is set up through `pct exec` after first boot: it patches dnsmasq's procd jail, which cannot start in an unprivileged container, and writes the WAN/LAN config with UCI.
 
 **Backups & snapshots**
 - Run `vzdump` on demand to any backup storage, in snapshot, suspend or stop mode.

@@ -7,11 +7,14 @@
 #                                 firmware: seabios|ovmf   kind: img (default)|iso
 #   appl_<id>_defaults <version>  sets the A_* VM defaults
 # appl_install collects A_* settings; appl_execute does the work.
+# OpenWrt is a container, not a VM: it has its own wizard (appl_openwrt_install)
+# and only provides appl_openwrt_versions.
 
 APPL_CACHE=${APPL_CACHE:-/var/cache/pve-tools/images}
 APPL_ISO_CACHE=${APPL_ISO_CACHE:-/var/lib/vz/template/iso}
 APPL_WIFI5_BASE=https://files.wifi5-soft.com/files/vendo-img
 APPL_KITIFI_BASE=https://files.kitifi.com
+APPL_OPENWRT_BASE=https://downloads.openwrt.org
 
 
 # --- MikroTik CHR / RouterOS x86 (elseif/MikroTikPatch) ---------------------
@@ -186,6 +189,44 @@ appl_wifi5_defaults() {
   A_SERIAL=0 A_ONBOOT=1 A_START=1 A_TEMPLATE=0 A_NOTE=""
 }
 
+# --- OpenWrt (LXC) ------------------------------------------------------------------------
+# Ported from Kintoyyy/openwrt-proxmox-lxc: the x86-64 rootfs becomes an unprivileged
+# container with WAN on eth0 (DHCP) and LAN on eth1 (static), set up through UCI.
+
+# The newest release of each of the last four series (or its latest rc if the series has
+# no release yet), then the daily snapshot.
+appl_openwrt_versions() {
+  curl -fsS --max-time 20 "$APPL_OPENWRT_BASE/releases/" 2>/dev/null |
+    grep -oE 'href="[0-9]+\.[0-9]+\.[0-9]+(-rc[0-9]+)?/"' | cut -d'"' -f2 | tr -d / | sort -V |
+    awk -F. '
+      { s = $1 "." $2; if (!(s in seen)) { seen[s] = 1; order[++n] = s } }
+      /-rc/ { rc[s] = $0; next }
+      { final[s] = $0 }
+      END {
+        for (i = n; i > 0 && i > n - 4; i--) {
+          s = order[i]
+          if (s in final) printf "%s%s|OpenWrt %s\n", (marked++ ? "" : "*"), final[s], final[s]
+          else printf "%s|OpenWrt %s (release candidate)\n", rc[s], rc[s]
+        }
+      }'
+  echo "snapshot|Daily snapshot (LuCI not included)"
+  echo "custom|Enter another version"
+}
+
+# appl_openwrt_url <version|snapshot> — the rootfs tarball URL, read from the directory
+# listing because older releases name it ...-x86-64-generic-rootfs.tar.gz.
+appl_openwrt_url() {
+  local dir f
+  if [[ $1 == snapshot ]]; then
+    dir="$APPL_OPENWRT_BASE/snapshots/targets/x86/64"
+  else
+    dir="$APPL_OPENWRT_BASE/releases/$1/targets/x86/64"
+  fi
+  f=$(curl -fsS --max-time 20 "$dir/" 2>/dev/null |
+    grep -oE 'href="openwrt-[^"]*x86-64(-generic)?-rootfs\.tar\.gz"' | cut -d'"' -f2 | head -1)
+  [[ -n $f ]] && echo "$dir/$f"
+}
+
 # --- helpers ---------------------------------------------------------------------------
 
 # qm's import-from disk option needs PVE 7.2+.
@@ -206,6 +247,56 @@ appl_size_gib() {
     n=${s%T}; echo $((n * 1024))
   else
     echo "${s%G}"
+  fi
+}
+
+# appl_netmask <prefix> — dotted netmask for a prefix length, e.g. 24 -> 255.255.255.0.
+appl_netmask() {
+  local m=$(((0xffffffff << (32 - $1)) & 0xffffffff))
+  echo "$((m >> 24 & 255)).$((m >> 16 & 255)).$((m >> 8 & 255)).$((m & 255))"
+}
+
+# appl_pick_bridge <title> <text> <default> [allow_none] — prints a bridge, or "none".
+appl_pick_bridge() {
+  local title=$1 text=$2 def=$3 allow_none=${4:-0} b bridge
+  local -a bridges items=()
+  mapfile -t bridges < <(appl_bridges)
+  if ((${#bridges[@]})); then
+    for b in "${bridges[@]}"; do items+=("$b" "Linux bridge"); done
+    ((allow_none)) && items+=(none "Not connected")
+    bridge=$(UI_DEFAULT_ITEM=$def ui_menu "$title" "$text:" "${items[@]}") || return 1
+  else
+    bridge=$(ui_input "$title" "$text (none detected):" "$def") || return 1
+  fi
+  if [[ $bridge != none && ! $bridge =~ ^[A-Za-z0-9._-]+$ ]]; then
+    ui_msg "$title" "Invalid bridge '$bridge'."
+    return 1
+  fi
+  printf '%s\n' "$bridge"
+}
+
+# appl_download <url> [max_age_min] — download <url> into the cache, or reuse the cached
+# copy, and set APPL_ARCHIVE. A cached copy older than max_age_min is downloaded again.
+# The name carries a hash of the URL: the official and elseif CHR downloads are both
+# chr-<v>.img.zip, and reusing the official one (ext2 boot partition, no EFI loader)
+# under OVMF leaves no bootable device.
+appl_download() {
+  local url=$1 max_age=${2:-0} key
+  key=$(printf '%s' "$url" | md5sum | cut -c1-8)
+  APPL_ARCHIVE="$APPL_CACHE/$A_ID-$A_VERSION-$key-${url##*/}"
+
+  msg_title "Download ${url##*/}"
+  if [[ -s $APPL_ARCHIVE ]] &&
+    { ((max_age == 0)) || [[ -z $(find "$APPL_ARCHIVE" -mmin +"$max_age") ]]; }; then
+    msg_ok "Using cached ${APPL_ARCHIVE##*/}"
+    return 0
+  fi
+  if ! { run mkdir -p "$APPL_CACHE" &&
+    run curl -fL --retry 3 --progress-bar -o "$APPL_ARCHIVE.part" "$url" &&
+    run mv "$APPL_ARCHIVE.part" "$APPL_ARCHIVE"; }; then
+    msg_error "Download failed: $url"
+    run rm -f "$APPL_ARCHIVE.part"
+    return 1
   fi
 }
 
@@ -321,23 +412,9 @@ appl_import_iso() {
 }
 
 appl_execute() {
-  # Key the cache on the URL, not just the file name: the official and elseif
-  # CHR downloads are both chr-<v>.img.zip, and reusing the official one (ext2
-  # boot partition, no EFI loader) under OVMF leaves no bootable device.
-  local key archive
-  key=$(printf '%s' "$A_URL" | md5sum | cut -c1-8)
-  archive="$APPL_CACHE/$A_ID-$A_VERSION-$key-${A_URL##*/}"
-
-  msg_title "Download ${A_URL##*/}"
-  if [[ -s $archive ]]; then
-    msg_ok "Using cached ${archive##*/}"
-  elif ! { run mkdir -p "$APPL_CACHE" &&
-    run curl -fL --retry 3 --progress-bar -o "$archive.part" "$A_URL" &&
-    run mv "$archive.part" "$archive"; }; then
-    msg_error "Download failed: $A_URL"
-    run rm -f "$archive.part"
-    return 1
-  fi
+  local archive
+  appl_download "$A_URL" || return 1
+  archive=$APPL_ARCHIVE
 
   if [[ $A_KIND == iso ]]; then
     # The on-storage name is the vendor's file name (from the URL), not the
@@ -420,21 +497,13 @@ appl_execute() {
 
 # --- wizard ------------------------------------------------------------------------------
 
-# appl_install <id> <label>
-# Expects appl_<id>_versions / _images / _defaults to exist (see the header).
-appl_install() {
-  local id=$1 title="Install $2"
-  local line v desc def="" ver tag out i b bridge summary
-  local -a lines items bridges
+# appl_pick_version <id> <title> — version menu from appl_<id>_versions; prints the choice.
+# jq install messages are on stderr, so they don't pollute the menu.
+appl_pick_version() {
+  local id=$1 title=$2 line v desc def="" ver
+  local -a lines items=()
 
-  if ! appl_supported; then
-    ui_msg "$title" "Appliance installers need Proxmox VE 7.2 or newer (qm import-from)."
-    return
-  fi
-
-  # Version (jq install messages are on stderr, so they don't pollute the menu)
   mapfile -t lines < <(appl_"${id}"_versions)
-  items=()
   for line in "${lines[@]}"; do
     [[ -n $line ]] || continue
     v=${line%%|*} desc=${line#*|}
@@ -442,19 +511,33 @@ appl_install() {
     items+=("$v" "$desc")
   done
   if ((${#items[@]} == 0)); then
-    ver=$(ui_input "$title" "Could not fetch the version list. Enter a version:") || return
+    ver=$(ui_input "$title" "Could not fetch the version list. Enter a version:") || return 1
   else
-    ver=$(UI_DEFAULT_ITEM=$def ui_menu "$title" "Choose a version:" "${items[@]}") || return
+    ver=$(UI_DEFAULT_ITEM=$def ui_menu "$title" "Choose a version:" "${items[@]}") || return 1
   fi
   if [[ $ver == custom ]]; then
-    def=${items[0]}
-    [[ $def == custom ]] && def=""
-    ver=$(ui_input "$title" "Version (e.g. 7.24.5):" "$def") || return
+    ver=$(ui_input "$title" "Version:" "$def") || return 1
   fi
   if [[ ! $ver =~ ^[A-Za-z0-9._-]+$ ]]; then
     ui_msg "$title" "Invalid version '$ver'."
+    return 1
+  fi
+  printf '%s\n' "$ver"
+}
+
+# appl_install <id> <label>
+# Expects appl_<id>_versions / _images / _defaults to exist (see the header).
+appl_install() {
+  local id=$1 title="Install $2"
+  local line desc ver tag out i bridge summary
+  local -a lines items bridges
+
+  if ! appl_supported; then
+    ui_msg "$title" "Appliance installers need Proxmox VE 7.2 or newer (qm import-from)."
     return
   fi
+
+  ver=$(appl_pick_version "$id" "$title") || return
 
   # Image variant (tag|description|url|firmware[|kind])
   mapfile -t lines < <(appl_"${id}"_images "$ver")
@@ -517,19 +600,8 @@ boots the installer again."
   mapfile -t bridges < <(appl_bridges)
   A_BRIDGES=()
   for ((i = 0; i < A_NICS; i++)); do
-    if ((${#bridges[@]})); then
-      items=()
-      for b in "${bridges[@]}"; do items+=("$b" "Linux bridge"); done
-      ((i > 0)) && items+=(none "No net$i")
-      bridge=$(UI_DEFAULT_ITEM=${bridges[i]:-} ui_menu "$title" "Bridge for net$i:" "${items[@]}") || return
-    else
-      bridge=$(ui_input "$title" "Bridge for net$i (none detected):" "vmbr$i") || return
-    fi
+    bridge=$(appl_pick_bridge "$title" "Bridge for net$i" "${bridges[i]:-vmbr$i}" $((i > 0))) || return
     [[ $bridge == none ]] && break
-    if [[ ! $bridge =~ ^[A-Za-z0-9._-]+$ ]]; then
-      ui_msg "$title" "Invalid bridge '$bridge'."
-      return
-    fi
     A_BRIDGES+=("$bridge")
   done
 
@@ -588,24 +660,208 @@ The download is cached in $APPL_CACHE."
   pause
 }
 
+appl_openwrt_execute() {
+  local ip=${A_LAN%/*} mask i
+  local -a args
+  mask=$(appl_netmask "${A_LAN#*/}")
+
+  # Snapshots are rebuilt daily, so a cached one older than a day is fetched again.
+  appl_download "$A_URL" "$([[ $A_VERSION == snapshot ]] && echo 1440 || echo 0)" || return 1
+
+  msg_title "Create container $A_VMID"
+  args=(pct create "$A_VMID" "$APPL_ARCHIVE" --arch amd64 --ostype unmanaged
+    --hostname "$A_NAME" --rootfs "$A_STORAGE:$A_DISK"
+    --memory "$A_MEMORY" --cores "$A_CORES" --unprivileged 1 --features nesting=1)
+  [[ $A_WAN != none ]] && args+=(--net0 "name=eth0,bridge=$A_WAN")
+  [[ $A_LAN_BRIDGE != none ]] && args+=(--net1 "name=eth1,bridge=$A_LAN_BRIDGE")
+  ((A_ONBOOT)) && args+=(--onboot 1)
+  if ! run "${args[@]}"; then
+    msg_error "pct create failed."
+    return 1
+  fi
+
+  msg_title "Start container"
+  run pct start "$A_VMID" || { msg_error "pct start failed."; return 1; }
+  if ! is_dry_run; then
+    # Wait for netifd, so the first-boot network config exists before it is changed.
+    for ((i = 0; i < 30; i++)); do
+      pct exec "$A_VMID" -- ubus call network.interface dump >/dev/null 2>&1 && break
+      sleep 1
+    done
+  fi
+
+  msg_title "Configure network"
+  # dnsmasq's procd jail cannot be set up in an unprivileged container.
+  run pct exec "$A_VMID" -- sed -i 's!procd_add_jail!: procd_add_jail!g' /etc/init.d/dnsmasq ||
+    msg_warn "Could not patch /etc/init.d/dnsmasq; DHCP on the LAN may not start."
+  run pct exec "$A_VMID" -- sh -c "
+    uci set network.wan=interface
+    uci set network.wan.proto='dhcp'
+    uci set network.wan.device='eth0'
+    uci set network.wan6=interface
+    uci set network.wan6.proto='dhcpv6'
+    uci set network.wan6.device='eth0'
+    uci set network.lan=interface
+    uci set network.lan.proto='static'
+    uci set network.@device[0].ports='eth1'
+    uci set network.lan.ipaddr='$ip'
+    uci set network.lan.netmask='$mask'
+    uci commit network
+    /etc/init.d/network restart
+    /etc/init.d/dnsmasq restart" ||
+    msg_warn "Network configuration failed; check it with: pct exec $A_VMID -- uci show network"
+
+  if ((A_LUCI)); then
+    msg_title "Install LuCI"
+    # WAN may still be waiting for its DHCP lease, so retry for up to 30 seconds.
+    run pct exec "$A_VMID" -- sh -c '
+      for i in 1 2 3 4 5 6; do
+        if command -v apk >/dev/null; then
+          apk update && apk add luci && exit 0
+        else
+          opkg update && opkg install luci && exit 0
+        fi
+        sleep 5
+      done
+      exit 1' ||
+      msg_warn "LuCI install failed. Once WAN is up: pct exec $A_VMID -- apk add luci (or opkg install luci)"
+  fi
+
+  if [[ -n $A_PASSWORD ]]; then
+    msg_title "Set root password"
+    printf '%s\n%s\n' "$A_PASSWORD" "$A_PASSWORD" | run pct exec "$A_VMID" -- passwd ||
+      msg_warn "Could not set the root password; set it with: pct exec $A_VMID -- passwd"
+  fi
+
+  if ! is_dry_run; then
+    msg_title "Container $A_VMID"
+    pct config "$A_VMID"
+  fi
+  msg_ok "Container $A_VMID ($A_NAME) is running."
+  printf '\nShell: pct enter %s\nLuCI:  http://%s from the LAN side (login root, %s)\n' \
+    "$A_VMID" "$ip" "$([[ -n $A_PASSWORD ]] && echo "the password you set" || echo "no password yet")"
+  return 0
+}
+
+appl_openwrt_install() {
+  local title="Install OpenWrt" ver pw pw2 out summary wan_desc lan_desc
+  local -a bridges opt_items
+
+  ver=$(appl_pick_version openwrt "$title") || return
+  A_URL=$(appl_openwrt_url "$ver")
+  if [[ -z $A_URL ]]; then
+    ui_msg "$title" "No x86-64 rootfs found for OpenWrt $ver."
+    return
+  fi
+  A_ID=openwrt A_VERSION=$ver
+  A_NAME=openwrt A_MEMORY=256 A_CORES=2 A_DISK=0.5 A_LAN=192.168.0.1/24 A_ONBOOT=0
+  # Release rootfs tarballs include LuCI; snapshots do not.
+  A_LUCI=0
+  [[ $ver == snapshot ]] && A_LUCI=1
+
+  # Container id and hostname
+  A_VMID=$(ui_input "$title" "Container ID:" "$(pvesh get /cluster/nextid 2>/dev/null)") || return
+  if [[ ! $A_VMID =~ ^[1-9][0-9]*$ ]] || ! pvesh get /cluster/nextid --vmid "$A_VMID" >/dev/null 2>&1; then
+    ui_msg "$title" "Container ID '$A_VMID' is invalid or already in use."
+    return
+  fi
+  A_NAME=$(ui_input "$title" "Hostname:" "$A_NAME") || return
+  if [[ ! $A_NAME =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]]; then
+    ui_msg "$title" "Invalid hostname '$A_NAME' (letters, digits, '-' and '.')."
+    return
+  fi
+
+  A_STORAGE=$(ui_pick_storage rootdir) || return
+
+  # Network: WAN on eth0, LAN on eth1. Either may be left off, but not both.
+  mapfile -t bridges < <(appl_bridges)
+  A_WAN=$(appl_pick_bridge "$title" "WAN bridge (eth0, DHCP)" "${bridges[0]:-vmbr0}" 1) || return
+  A_LAN_BRIDGE=$(appl_pick_bridge "$title" "LAN bridge (eth1, static)" "${bridges[1]:-none}" 1) || return
+  if [[ $A_WAN == none && $A_LAN_BRIDGE == none ]]; then
+    ui_msg "$title" "Connect at least one of WAN or LAN."
+    return
+  fi
+  A_LAN=$(ui_input "$title" "LAN address/prefix (eth1):" "$A_LAN") || return
+  if [[ ! $A_LAN =~ ^([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})\.([0-9]{1,3})/([0-9]{1,2})$ ]] ||
+    ((BASH_REMATCH[1] > 255 || BASH_REMATCH[2] > 255 || BASH_REMATCH[3] > 255 ||
+      BASH_REMATCH[4] > 255 || BASH_REMATCH[5] < 8 || BASH_REMATCH[5] > 30)); then
+    ui_msg "$title" "Invalid LAN address '$A_LAN' (e.g. 192.168.0.1/24, prefix 8-30)."
+    return
+  fi
+
+  # Resources
+  A_CORES=$(ui_input "$title" "CPU cores:" "$A_CORES") || return
+  A_MEMORY=$(ui_input "$title" "Memory (MB):" "$A_MEMORY") || return
+  A_DISK=$(ui_input "$title" "Disk size in GiB (e.g. 0.5, 1, 2):" "$A_DISK") || return
+  if [[ ! $A_CORES =~ ^[1-9][0-9]*$ || ! $A_MEMORY =~ ^[1-9][0-9]+$ ||
+    ! $A_DISK =~ ^[0-9]+(\.[0-9]+)?$ || $A_DISK =~ ^0+(\.0+)?$ ]]; then
+    ui_msg "$title" "Invalid cores ($A_CORES), memory ($A_MEMORY) or disk size ($A_DISK)."
+    return
+  fi
+
+  # Root password (optional)
+  pw=$(ui_password "$title" "Root password (leave empty to set it later):") || return
+  if [[ -n $pw ]]; then
+    pw2=$(ui_password "$title" "Confirm the root password:") || return
+    if [[ $pw != "$pw2" ]]; then
+      ui_msg "$title" "The passwords do not match."
+      return
+    fi
+  fi
+  A_PASSWORD=$pw
+
+  # Options
+  opt_items=(onboot "Start at host boot" "$(appl_onoff "$A_ONBOOT")")
+  ((A_LUCI)) && opt_items+=(luci "Install LuCI (web UI) from the package feed" ON)
+  out=$(UI_ALLOW_EMPTY=1 ui_checklist "$title" "Options:" "${opt_items[@]}") || return
+  out=$'\n'"$out"$'\n'
+  A_ONBOOT=0 A_LUCI=0
+  [[ $out == *$'\n'onboot$'\n'* ]] && A_ONBOOT=1
+  [[ $out == *$'\n'luci$'\n'* ]] && A_LUCI=1
+
+  wan_desc="eth0 on $A_WAN, DHCP + DHCPv6"
+  [[ $A_WAN == none ]] && wan_desc="not connected"
+  lan_desc="eth1 on $A_LAN_BRIDGE, $A_LAN"
+  [[ $A_LAN_BRIDGE == none ]] && lan_desc="not connected ($A_LAN once eth1 is added)"
+  summary="CT       $A_VMID ($A_NAME), unprivileged, nesting
+Image    ${A_URL##*/}
+Version  $ver
+Storage  $A_STORAGE, rootfs ${A_DISK}G
+CPU/RAM  $A_CORES cores, $A_MEMORY MB
+WAN      $wan_desc
+LAN      $lan_desc
+Password $([[ -n $A_PASSWORD ]] && echo set || echo "not set")
+LuCI     $([[ $ver != snapshot ]] && echo included || { ((A_LUCI)) && echo "install from the feed" || echo "not installed"; })
+After    start$( ((A_ONBOOT)) && echo ", start at boot")
+
+The download is cached in $APPL_CACHE."
+  ui_yesno "$title" "$summary\n\nCreate this container?" || return
+
+  ui_terminal "$title"
+  appl_openwrt_execute
+  pause
+}
+
 appliances_menu() {
   local choice size
   while true; do
     size=$(du -sh "$APPL_CACHE" 2>/dev/null | cut -f1)
-    choice=$(ui_menu "Appliance installers" "Download an appliance image and create a VM from it:" \
-      chr    "MikroTik RouterOS (CHR image or x86 ISO)" \
-      kitifi "KiTifi (controller or standalone)" \
-      wifi5  "WiFi5 Soft vendo" \
-      cache  "Clear download cache (${size:-empty})" \
-      back   "Back") || return
+    choice=$(ui_menu "Appliance installers" "Download an appliance image and create a VM or container from it:" \
+      chr     "MikroTik RouterOS (CHR image or x86 ISO)" \
+      kitifi  "KiTifi (controller or standalone)" \
+      wifi5   "WiFi5 Soft vendo" \
+      openwrt "OpenWrt (LXC container)" \
+      cache   "Clear download cache (${size:-empty})" \
+      back    "Back") || return
     case $choice in
-      chr)    appl_install chr "MikroTik" ;;
-      kitifi) appl_install kitifi "KiTifi" ;;
-      wifi5)  appl_install wifi5 "WiFi5 Soft" ;;
+      chr)     appl_install chr "MikroTik" ;;
+      kitifi)  appl_install kitifi "KiTifi" ;;
+      wifi5)   appl_install wifi5 "WiFi5 Soft" ;;
+      openwrt) appl_openwrt_install ;;
       cache)
         ui_confirm "Download cache" "Delete all cached images in $APPL_CACHE (${size:-empty})?" &&
           run rm -rf "$APPL_CACHE" >/dev/null ;;
-      back)   return ;;
+      back)    return ;;
     esac
   done
 }
