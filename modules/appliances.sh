@@ -1,30 +1,77 @@
 # shellcheck shell=bash
-# Appliance installers: download a vendor disk image and build a ready-to-run VM from it.
+# Appliance installers: download a vendor disk image (or ISO) and build a ready-to-run VM.
 #
 # Each appliance <id> provides:
 #   appl_<id>_versions            "version|description" lines, newest first ("*" prefix = default)
-#   appl_<id>_images <version>    "tag|description|url|firmware" lines (firmware: seabios|ovmf)
+#   appl_<id>_images <version>    "tag|description|url|firmware[|kind]" lines
+#                                 firmware: seabios|ovmf   kind: img (default)|iso
 #   appl_<id>_defaults <version>  sets the A_* VM defaults
 # The wizard (appl_install) collects A_* settings; appl_execute does the work.
 
 APPL_CACHE=${APPL_CACHE:-/var/cache/pve-tools/images}
+APPL_ISO_CACHE=${APPL_ISO_CACHE:-/var/lib/vz/template/iso}
 APPL_WIFI5_BASE=https://files.wifi5-soft.com/files/vendo-img
 APPL_KITIFI_BASE=https://files.kitifi.com
 
-# --- MikroTik RouterOS CHR (official images) ----------------------------------------
 
+# --- MikroTik CHR releases -------------------------------------------------
+
+APPL_CHR_API="https://api.github.com/repos/elseif/RouterOS/releases"
+
+# Fetch every release page (GitHub caps at 100/page) so the menu lists all versions.
 appl_chr_versions() {
-  local ch v
-  for ch in stable long-term testing; do
-    # Returns e.g. "7.24.5 1790691687"
-    v=$(curl -fsS --max-time 15 "https://upgrade.mikrotik.com/routeros/NEWESTa7.$ch" 2>/dev/null | cut -d' ' -f1)
-    [[ -n $v ]] && echo "$v|RouterOS $v ($ch)"
+  local page=1 releases all=""
+
+  while :; do
+    releases=$(curl -fsSL --max-time 30 \
+      "$APPL_CHR_API?per_page=100&page=$page") || {
+        (( page == 1 )) && { echo "custom|Enter another version"; return 0; }
+        break
+      }
+
+    [[ $(jq 'length' <<< "$releases") -eq 0 ]] && break
+
+    all+=$releases
+    ((page++))
   done
+
+  jq -rs '
+    add
+    | [.[] | select(.draft == false)]
+    | sort_by(.published_at)
+    | reverse
+    | .[]
+    | .tag_name as $v
+    | if .prerelease then
+        $v + "|RouterOS " + $v + " (pre-release)"
+      else
+        $v + "|RouterOS " + $v
+      end
+  ' <<< "$all" |
+  awk 'NR == 1 {print "*" $0; next} {print}'
+
   echo "custom|Enter another version"
 }
 
 appl_chr_images() {
-  echo "raw|Official CHR raw disk image|https://download.mikrotik.com/routeros/$1/chr-$1.img.zip|seabios"
+  local v="$1"
+  local release
+
+  release=$(curl -fsSL --max-time 20 \
+    "https://api.github.com/repos/elseif/RouterOS/releases/tags/$v") ||
+    return 1
+
+  jq -r --arg v "$v" '
+    .assets[]
+    | select(.name | test("^chr-" + $v + "(-legacy-bios)?\\.img\\.zip$"))
+    | if (.name | contains("-legacy-bios")) then
+        "bios|Legacy BIOS disk image|" +
+        .browser_download_url + "|seabios|img"
+      else
+        "uefi|UEFI disk image|" +
+        .browser_download_url + "|ovmf|img"
+      end
+  ' <<< "$release"
 }
 
 appl_chr_defaults() {
@@ -51,14 +98,14 @@ appl_kitifi_images() {
   case $1 in
     ctl-*)
       v=${1#ctl-}
-      echo "uefi|UEFI image|$APPL_KITIFI_BASE/MT-Based/$v/Main/KiTifi-$v-uefi-x86.img.xz|ovmf" ;;
+      echo "uefi|UEFI image|$APPL_KITIFI_BASE/MT-Based/$v/Main/KiTifi-$v-uefi-x86.img.xz|ovmf|img" ;;
     sa-v1.3-stable)
-      echo "uefi|UEFI (ext4)|$sa/v1.3-stable/KiTifi-OpenWRT-x86-64-generic-ext4-efi-v1.3-stable.img.gz|ovmf"
-      echo "bios|Legacy BIOS (ext4)|$sa/v1.3-stable/KiTifi-OpenWRT-x86-64-generic-ext4-v1.3-stable.img.gz|seabios" ;;
+      echo "uefi|UEFI (ext4)|$sa/v1.3-stable/KiTifi-OpenWRT-x86-64-generic-ext4-efi-v1.3-stable.img.gz|ovmf|img"
+      echo "bios|Legacy BIOS (ext4)|$sa/v1.3-stable/KiTifi-OpenWRT-x86-64-generic-ext4-v1.3-stable.img.gz|seabios|img" ;;
     sa-*)
       v=${1#sa-}
-      echo "uefi|UEFI|$sa/$v/KiTifi-OpenWRT-x86-64-generic-efi-$v.img.gz|ovmf"
-      echo "bios|Legacy BIOS|$sa/$v/KiTifi-OpenWRT-x86-64-generic-$v.img.gz|seabios" ;;
+      echo "uefi|UEFI|$sa/$v/KiTifi-OpenWRT-x86-64-generic-efi-$v.img.gz|ovmf|img"
+      echo "bios|Legacy BIOS|$sa/$v/KiTifi-OpenWRT-x86-64-generic-$v.img.gz|seabios|img" ;;
   esac
 }
 
@@ -70,7 +117,6 @@ appl_kitifi_defaults() {
 
 # --- WiFi5 Soft vendo -------------------------------------------------------------------
 
-# The vendor's file server returns a JSON directory listing.
 appl_wifi5_versions() {
   local v first=1
   while read -r v; do
@@ -85,16 +131,15 @@ appl_wifi5_versions() {
   done < <(curl -fsS --max-time 20 "$APPL_WIFI5_BASE/" 2>/dev/null | grep -o '"name":"v[^"]*"' | cut -d'"' -f4 | sort -rV)
 }
 
-# File names changed from x86-64-*.img.gz to x86_64-*.img.gz in v3.5.89, so read them from the listing.
 appl_wifi5_images() {
   local f
   curl -fsS --max-time 20 "$APPL_WIFI5_BASE/$1/" 2>/dev/null |
     grep -o '"name":"x86[-_]64[^"]*\.img\.gz"' | cut -d'"' -f4 |
     while read -r f; do
       if [[ $f == *efi* ]]; then
-        echo "uefi|UEFI ($f)|$APPL_WIFI5_BASE/$1/$f|ovmf"
+        echo "uefi|UEFI ($f)|$APPL_WIFI5_BASE/$1/$f|ovmf|img"
       else
-        echo "bios|Legacy BIOS ($f)|$APPL_WIFI5_BASE/$1/$f|seabios"
+        echo "bios|Legacy BIOS ($f)|$APPL_WIFI5_BASE/$1/$f|seabios|img"
       fi
     done | sort -t'|' -k1,1r
 }
@@ -122,9 +167,18 @@ appl_qm_args() {
   local i
   APPL_ARGS=(qm create "$A_VMID" --name "$A_NAME" --ostype l26
     --memory "$A_MEMORY" --cores "$A_CORES" --sockets "$A_SOCKETS" --cpu host
-    --scsihw virtio-scsi-single
-    --scsi0 "$A_STORAGE:0,import-from=$A_IMG,discard=on,iothread=1"
-    --boot order=scsi0)
+    --scsihw virtio-scsi-single)
+
+  if [[ $A_KIND == iso ]]; then
+    # Empty system disk the installer will partition; ISO on ide2 for max compatibility.
+    APPL_ARGS+=(--scsi0 "$A_STORAGE:$A_DISK,discard=on,iothread=1"
+                --ide2 "$A_ISO_VOLID,media=cdrom"
+                --boot order='ide2;scsi0')
+  else
+    APPL_ARGS+=(--scsi0 "$A_STORAGE:0,import-from=$A_IMG,discard=on,iothread=1"
+                --boot order=scsi0)
+  fi
+
   for i in "${!A_BRIDGES[@]}"; do
     APPL_ARGS+=("--net$i" "virtio,bridge=${A_BRIDGES[$i]}")
   done
@@ -171,6 +225,38 @@ appl_extract() {
   esac
 }
 
+# Copy an ISO into an iso-capable storage and echo the resulting volid.
+appl_import_iso() {
+  local src=$1 storage=$2 name=${1##*/} volid
+  _log IMPORT-ISO "$src -> $storage:$name"
+
+  # If pvesm understands "alloc", prefer it so the file is tracked properly.
+  if pvesm alloc "$storage" 0 "$name" 0 >/dev/null 2>&1; then
+    volid=$(pvesm list "$storage" --content iso 2>/dev/null |
+      awk -v n="$name" '$1 ~ n {print $1; exit}')
+  fi
+
+  if [[ -z $volid ]]; then
+    # Fall back to a plain copy into the storage's iso directory.
+    local path
+    path=$(pvesm path "$storage:iso/$name" 2>/dev/null) || true
+    if [[ -z $path ]]; then
+      local dir
+      dir=$(awk -v s="$storage" '
+        $1 == "dir:" s || $1 == "nfs:" s || $1 == "cifs:" s || $1 == "glusterfs:" s {p=1}
+        p && $1 == "path" {print $2; exit}
+      ' /etc/pve/storage.cfg)
+      dir=${dir:-$APPL_ISO_CACHE}
+      path="$dir/template/iso/$name"
+    fi
+    run mkdir -p "$(dirname "$path")"
+    run cp "$src" "$path" || return 1
+    volid="$storage:iso/$name"
+  fi
+
+  echo "$volid"
+}
+
 # Download, extract, create the VM and run the post-create steps for the A_* settings.
 appl_execute() {
   local archive="$APPL_CACHE/$A_ID-$A_VERSION-${A_URL##*/}"
@@ -186,6 +272,44 @@ appl_execute() {
     return 1
   fi
 
+  if [[ $A_KIND == iso ]]; then
+    # ---- ISO path: import ISO, create VM with an empty disk, boot from CD ----
+    msg_title "Import ISO to $A_ISO_STORAGE"
+    if is_dry_run; then
+      A_ISO_VOLID="$A_ISO_STORAGE:iso/${A_URL##*/}"
+      printf '%s[dry-run]%s import %s -> %s\n' "$C_YELLOW" "$C_RESET" "$archive" "$A_ISO_VOLID"
+    else
+      A_ISO_VOLID=$(appl_import_iso "$archive" "$A_ISO_STORAGE") || {
+        msg_error "Could not import ISO into $A_ISO_STORAGE."
+        return 1
+      }
+      msg_ok "ISO ready as $A_ISO_VOLID"
+    fi
+
+    msg_title "Create VM $A_VMID"
+    appl_qm_args
+    if ! run "${APPL_ARGS[@]}"; then
+      msg_error "qm create failed."
+      return 1
+    fi
+
+    # No resize, no template: the OS isn't installed yet.
+    if ((A_START)); then
+      msg_title "Start VM"
+      run qm start "$A_VMID"
+    fi
+
+    if ! is_dry_run; then
+      msg_title "VM $A_VMID"
+      qm config "$A_VMID"
+    fi
+    msg_ok "VM $A_VMID ($A_NAME) is ready."
+    printf '\nBoot the console and run the installer:\n  qm terminal %s\n' "$A_VMID"
+    [[ -n $A_NOTE ]] && printf '\n%s\n' "${A_NOTE//<vmid>/$A_VMID}"
+    return 0
+  fi
+
+  # ---- IMG path: existing behaviour ----
   msg_title "Extract"
   appl_need_tool "$archive" || return 1
   if ! appl_extract "$archive" "$A_IMG"; then
@@ -262,7 +386,7 @@ appl_install() {
     return
   fi
 
-  # Image variant
+  # Image variant (tag|description|url|firmware[|kind])
   mapfile -t lines < <(appl_"${id}"_images "$ver")
   if ((${#lines[@]} == 0)) || [[ -z ${lines[0]} ]]; then
     ui_msg "$title" "No x86-64 image found for version $ver."
@@ -278,7 +402,8 @@ appl_install() {
     tag=$(ui_menu "$title" "Choose the image (UEFI is recommended):" "${items[@]}") || return
     for line in "${lines[@]}"; do [[ ${line%%|*} == "$tag" ]] && break; done
   fi
-  IFS='|' read -r tag desc A_URL A_FIRMWARE <<<"$line"
+  IFS='|' read -r tag desc A_URL A_FIRMWARE A_KIND <<<"$line"
+  A_KIND=${A_KIND:-img}
   A_ID=$id A_VERSION=$ver
   appl_"${id}"_defaults "$ver"
 
@@ -293,10 +418,16 @@ appl_install() {
     ui_msg "$title" "Invalid name '$A_NAME' (letters, digits, '-' and '.')."
     return
   fi
-  A_IMG="$APPL_CACHE/import-$A_VMID.img"
 
-  # Storage
+  # Storage (disk); ISO also needs an iso-capable storage.
   A_STORAGE=$(ui_pick_storage images) || return
+  if [[ $A_KIND == iso ]]; then
+    A_IMG=""
+    A_ISO_STORAGE=$(ui_pick_storage iso) || return
+  else
+    A_IMG="$APPL_CACHE/import-$A_VMID.img"
+    A_ISO_STORAGE=""
+  fi
 
   # Network
   mapfile -t bridges < <(appl_bridges)
@@ -327,11 +458,14 @@ appl_install() {
     return
   fi
 
-  # Options
-  out=$(UI_ALLOW_EMPTY=1 ui_checklist "$title" "Options:" \
-    onboot   "Start at host boot"          "$(appl_onoff "$A_ONBOOT")" \
-    start    "Start the VM when done"      "$(appl_onoff "$A_START")" \
-    template "Convert to a template"       "$(appl_onoff "$A_TEMPLATE")") || return
+  # Options (template only makes sense for img installs)
+  local -a opt_items=(
+    onboot   "Start at host boot"     "$(appl_onoff "$A_ONBOOT")"
+    start    "Start the VM when done" "$(appl_onoff "$A_START")"
+  )
+  [[ $A_KIND == img ]] && opt_items+=(template "Convert to a template" "$(appl_onoff "$A_TEMPLATE")")
+
+  out=$(UI_ALLOW_EMPTY=1 ui_checklist "$title" "Options:" "${opt_items[@]}") || return
   out=$'\n'"$out"$'\n'
   A_ONBOOT=0 A_START=0 A_TEMPLATE=0
   [[ $out == *$'\n'onboot$'\n'* ]] && A_ONBOOT=1
@@ -342,14 +476,25 @@ appl_install() {
     return
   fi
 
+  local kind_desc after
+  if [[ $A_KIND == iso ]]; then
+    kind_desc="ISO installer (boot from CD, install to disk)"
+    after=$( ((A_START)) && echo "start, then run the installer on the console" || echo "leave stopped; boot console to install" )
+  else
+    kind_desc="Disk image (imported onto scsi0)"
+    after=$( ((A_TEMPLATE)) && echo "convert to template" || { ((A_START)) && echo "start"; } || echo "leave stopped" )
+  fi
+
   summary="VM       $A_VMID ($A_NAME)
+Kind     $kind_desc
 Image    ${A_URL##*/}
 Version  $ver, $([[ $A_FIRMWARE == ovmf ]] && echo "UEFI (OVMF)" || echo "SeaBIOS")
-Storage  $A_STORAGE, disk $A_DISK
+Storage  $A_STORAGE, disk $A_DISK$([[ $A_KIND == iso ]] && echo "
+ISO      $A_ISO_STORAGE")
 CPU/RAM  $A_CORES cores, $A_MEMORY MB
 Network  ${A_BRIDGES[*]:-none}$( ((A_SERIAL)) && echo "
 Console  serial (qm terminal $A_VMID)")
-After    $( ((A_TEMPLATE)) && echo "convert to template" || { ((A_START)) && echo "start"; } || echo "leave stopped")$( ((A_ONBOOT)) && echo ", start at boot")
+After    $after$( ((A_ONBOOT)) && echo ", start at boot")
 
 The download is cached in $APPL_CACHE."
   ui_yesno "$title" "$summary\n\nCreate this VM?" || return
