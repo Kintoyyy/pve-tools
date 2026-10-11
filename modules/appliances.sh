@@ -3,8 +3,9 @@
 #
 # Each appliance <id> provides:
 #   appl_<id>_versions            "version|description" lines, newest first ("*" prefix = default)
-#   appl_<id>_images <version>    "tag|description|url|firmware[|kind]" lines
+#   appl_<id>_images <version>    "tag|description|url|firmware[|kind[|file]]" lines
 #                                 firmware: seabios|ovmf   kind: img (default)|iso
+#                                 file: the ISO's name on the ISO storage (default: from the URL)
 #   appl_<id>_defaults <version>  sets the A_* VM defaults
 # appl_install collects A_* settings; appl_execute does the work.
 # OpenWrt is a container, not a VM: it has its own wizard (appl_openwrt_install)
@@ -15,9 +16,45 @@ APPL_ISO_CACHE=${APPL_ISO_CACHE:-/var/lib/vz/template/iso}
 APPL_WIFI5_BASE=https://files.wifi5-soft.com/files/vendo-img
 APPL_KITIFI_BASE=https://files.kitifi.com
 APPL_OPENWRT_BASE=https://downloads.openwrt.org
+APPL_MIKROTIK_BASE=https://download.mikrotik.com/routeros
 
 
-# --- MikroTik CHR / RouterOS x86 (elseif/MikroTikPatch) ---------------------
+# --- MikroTik RouterOS, official (download.mikrotik.com) ---------------------------------
+
+# The newest version on each release channel. A version shared by two channels is listed once.
+appl_mikrotik_versions() {
+  local ch v
+  for ch in stable long-term testing; do
+    # Returns e.g. "7.24.5 1790691687"
+    v=$(curl -fsS --max-time 15 "https://upgrade.mikrotik.com/routeros/NEWESTa7.$ch" 2>/dev/null | cut -d' ' -f1)
+    [[ -n $v ]] && echo "$v|$ch"
+  done | awk -F'|' '
+    !($1 in chans) { order[++n] = $1; chans[$1] = $2; next }
+    { chans[$1] = chans[$1] ", " $2 }
+    END {
+      for (i = 1; i <= n; i++)
+        printf "%s%s|RouterOS %s (%s)\n", (i == 1 ? "*" : ""), order[i], order[i], chans[order[i]]
+    }'
+  echo "custom|Enter another version"
+}
+
+# download.mikrotik.com has no listing, so the names follow MikroTik's fixed scheme:
+#   chr-<v>.img.zip  -> CHR disk image. Its boot partition is ext2 with no EFI loader,
+#                       so it only boots with legacy BIOS (SeaBIOS).
+#   mikrotik-<v>.iso -> RouterOS x86 installer ISO
+# Each file is probed, so a mistyped version fails here rather than at the download.
+appl_mikrotik_images() {
+  local base="$APPL_MIKROTIK_BASE/$1"
+  curl -fsI --max-time 15 "$base/chr-$1.img.zip" >/dev/null 2>&1 &&
+    echo "bios|CHR disk image (legacy BIOS)|$base/chr-$1.img.zip|seabios|img"
+  curl -fsI --max-time 15 "$base/mikrotik-$1.iso" >/dev/null 2>&1 &&
+    echo "iso|RouterOS x86 installer ISO|$base/mikrotik-$1.iso|seabios|iso"
+  return 0
+}
+
+appl_mikrotik_defaults() { appl_chr_defaults "$@"; }
+
+# --- MikroTik RouterOS, patched (elseif/MikroTikPatch) -----------------------------------
 
 APPL_CHR_API="https://api.github.com/repos/elseif/MikroTikPatch/releases"
 
@@ -77,7 +114,8 @@ appl_chr_versions() {
 #   chr-<v>-legacy-bios.img.zip -> CHR Legacy BIOS disk image
 #   mikrotik-<v>.iso            -> plain RouterOS x86 installer ISO
 # Ranked explicitly inside jq so UEFI is always the first line of the menu,
-# independent of the order GitHub happens to list assets in.
+# independent of the order GitHub happens to list assets in. The ISO is stored as
+# mikrotik-<v>-patched.iso so it can't overwrite the official ISO of the same name.
 appl_chr_images() {
   appl_need_jq || return 1
 
@@ -101,13 +139,14 @@ appl_chr_images() {
         elif .name == ("mikrotik-" + $v + ".iso") then
           {rank: 2, tag: "iso",
            desc: "RouterOS x86 installer ISO",
-           url: .browser_download_url, fw: "seabios", kind: "iso"}
+           url: .browser_download_url, fw: "seabios", kind: "iso",
+           file: ("mikrotik-" + $v + "-patched.iso")}
         else empty
         end
       )
     | sort_by(.rank)
     | .[]
-    | "\(.tag)|\(.desc)|\(.url)|\(.fw)|\(.kind)"
+    | "\(.tag)|\(.desc)|\(.url)|\(.fw)|\(.kind)|\(.file // "")"
   ' <<< "$release"
 }
 
@@ -417,10 +456,11 @@ appl_execute() {
   archive=$APPL_ARCHIVE
 
   if [[ $A_KIND == iso ]]; then
-    # The on-storage name is the vendor's file name (from the URL), not the
-    # cache name. The volid is computed from that same name so dry-run and a
-    # real run agree, and so qm create points at a volume that exists.
-    local iso_name="${A_URL##*/}"
+    # The on-storage name is the image's file field, else the vendor's file name
+    # (from the URL), never the cache name. The volid is computed from that same
+    # name so dry-run and a real run agree, and so qm create points at a volume
+    # that exists.
+    local iso_name="${A_FILE:-${A_URL##*/}}"
     A_ISO_VOLID="$A_ISO_STORAGE:iso/$iso_name"
 
     msg_title "Import ISO to $A_ISO_STORAGE"
@@ -529,7 +569,7 @@ appl_pick_version() {
 # Expects appl_<id>_versions / _images / _defaults to exist (see the header).
 appl_install() {
   local id=$1 title="Install $2"
-  local line desc ver tag out i bridge summary
+  local line desc ver tag out i bridge summary host
   local -a lines items bridges
 
   if ! appl_supported; then
@@ -539,7 +579,7 @@ appl_install() {
 
   ver=$(appl_pick_version "$id" "$title") || return
 
-  # Image variant (tag|description|url|firmware[|kind])
+  # Image variant (tag|description|url|firmware[|kind[|file]])
   mapfile -t lines < <(appl_"${id}"_images "$ver")
   if ((${#lines[@]} == 0)) || [[ -z ${lines[0]} ]]; then
     ui_msg "$title" "No x86-64 image found for version $ver."
@@ -552,12 +592,11 @@ appl_install() {
       IFS='|' read -r tag desc _ <<<"$line"
       items+=("$tag" "$desc")
     done
-    # CHR lists uefi first (ranked in jq), so uefi is the default; for other
-    # appliances we just take the first entry.
-    tag=$(UI_DEFAULT_ITEM=uefi ui_menu "$title" "Choose the image (UEFI is recommended):" "${items[@]}") || return
+    # uefi is preselected when offered; otherwise the first entry is.
+    tag=$(UI_DEFAULT_ITEM=uefi ui_menu "$title" "Choose the image:" "${items[@]}") || return
     for line in "${lines[@]}"; do [[ ${line%%|*} == "$tag" ]] && break; done
   fi
-  IFS='|' read -r tag desc A_URL A_FIRMWARE A_KIND <<<"$line"
+  IFS='|' read -r tag desc A_URL A_FIRMWARE A_KIND A_FILE <<<"$line"
   A_KIND=${A_KIND:-img}
   A_ID=$id A_VERSION=$ver
   appl_"${id}"_defaults "$ver"
@@ -641,9 +680,11 @@ boots the installer again."
     after=$( ((A_TEMPLATE)) && echo "convert to template" || { ((A_START)) && echo "start"; } || echo "leave stopped" )
   fi
 
+  # The host tells the two MikroTik sources apart: both serve chr-<v>.img.zip.
+  host=${A_URL#*://} host=${host%%/*}
   summary="VM       $A_VMID ($A_NAME)
 Kind     $kind_desc
-Image    ${A_URL##*/}
+Image    ${A_URL##*/} from $host
 Version  $ver, $([[ $A_FIRMWARE == ovmf ]] && echo "UEFI (OVMF)" || echo "SeaBIOS")
 Storage  $A_STORAGE, disk $A_DISK$([[ $A_KIND == iso ]] && echo "
 ISO      $A_ISO_STORAGE")
@@ -847,21 +888,23 @@ appliances_menu() {
   while true; do
     size=$(du -sh "$APPL_CACHE" 2>/dev/null | cut -f1)
     choice=$(ui_menu "Appliance installers" "Download an appliance image and create a VM or container from it:" \
-      chr     "MikroTik RouterOS (CHR image or x86 ISO)" \
-      kitifi  "KiTifi (controller or standalone)" \
-      wifi5   "WiFi5 Soft vendo" \
-      openwrt "OpenWrt (LXC container)" \
-      cache   "Clear download cache (${size:-empty})" \
-      back    "Back") || return
+      mikrotik "MikroTik RouterOS, official (download.mikrotik.com)" \
+      chr      "MikroTik RouterOS, patched (elseif/MikroTikPatch)" \
+      kitifi   "KiTifi (controller or standalone)" \
+      wifi5    "WiFi5 Soft vendo" \
+      openwrt  "OpenWrt (LXC container)" \
+      cache    "Clear download cache (${size:-empty})" \
+      back     "Back") || return
     case $choice in
-      chr)     appl_install chr "MikroTik" ;;
-      kitifi)  appl_install kitifi "KiTifi" ;;
-      wifi5)   appl_install wifi5 "WiFi5 Soft" ;;
-      openwrt) appl_openwrt_install ;;
+      mikrotik) appl_install mikrotik "MikroTik (official)" ;;
+      chr)      appl_install chr "MikroTik (patched)" ;;
+      kitifi)   appl_install kitifi "KiTifi" ;;
+      wifi5)    appl_install wifi5 "WiFi5 Soft" ;;
+      openwrt)  appl_openwrt_install ;;
       cache)
         ui_confirm "Download cache" "Delete all cached images in $APPL_CACHE (${size:-empty})?" &&
           run rm -rf "$APPL_CACHE" >/dev/null ;;
-      back)    return ;;
+      back)     return ;;
     esac
   done
 }
