@@ -50,14 +50,14 @@ pve-tools version
 
 **Appliance installers**
 
-The VM installers download a vendor disk image (or installer ISO) and build a ready-to-run VM from it. A wizard walks through version, image (UEFI, legacy BIOS or ISO), VM ID, name, storage, bridges, CPU/RAM/disk, and options (start at boot, start when done, convert to template). OpenWrt is a container rather than a VM; its wizard asks for version, container ID, hostname, storage, WAN and LAN bridges, LAN address, CPU/RAM/disk, an optional root password, and whether to start at boot.
+The VM installers download a vendor disk image (or installer ISO) and build a ready-to-run VM from it. A wizard walks through version, image (UEFI, legacy BIOS or ISO), VM ID, name, storage, bridges, CPU/RAM/disk, and options (start at boot, start when done, convert to template). OpenWrt is a container rather than a VM; its wizard asks for version, container ID, hostname, storage, WAN and LAN bridges, LAN address, CPU/RAM/disk, an optional root password, and whether to start at boot. Start at boot is off by default for every appliance; tick it in the options step if you want it.
 
 | Appliance | Source | Defaults |
 |---|---|---|
 | MikroTik RouterOS, official | MikroTik's own images from `download.mikrotik.com`. The newest stable, long-term and testing versions are looked up live, and stable is the default. Images: CHR (legacy BIOS only, since its boot partition has no EFI loader) or the RouterOS x86 installer ISO. | Same as the patched installer, but CHR always boots with SeaBIOS |
 | MikroTik RouterOS, patched | Patched RouterOS builds from the third-party [elseif/MikroTikPatch](https://github.com/elseif/MikroTikPatch) releases, **not** MikroTik's official images (see the [disclaimer](#disclaimer)). Every release is listed live, and the newest stable one is the default. Images: CHR UEFI (default), CHR legacy BIOS, or the RouterOS x86 installer ISO. | CHR: 2 cores, 4 GB, 8G disk, serial console, converted to a template. ISO: empty 8G disk with the ISO on a CD drive and a graphical console for the installer |
 | KiTifi | Controller v2.0/v2.2 (MikroTik-based) or Standalone v1.3/v2.1/v2.2-beta (OpenWrt-based) | UEFI. 128G disk for the controller, 8G for standalone |
-| WiFi5 Soft vendo | Version list read live from `files.wifi5-soft.com`. Defaults to the newest non-rc release. | UEFI, 2 NICs, 128G disk, start at boot, started when done |
+| WiFi5 Soft vendo | Version list read live from `files.wifi5-soft.com`. Defaults to the newest non-rc release. | UEFI, 2 NICs, 128G disk, started when done |
 | OpenWrt (LXC) | x86-64 rootfs from `downloads.openwrt.org`. The newest release of each recent series is looked up live, plus the daily snapshot. | Unprivileged container with nesting, 256 MB, 2 cores, 0.5G rootfs. WAN on eth0 (DHCP), LAN on eth1 (static, 192.168.0.1/24). Optional root password. LuCI comes with releases and is installed from the feed for snapshots |
 
 All VMs use `virtio-scsi-single` with `iothread` and `discard`, `cpu host`, and virtio NICs. UEFI images get an EFI disk without pre-enrolled Secure Boot keys, so the unsigned images can boot. The VM installers require PVE 7.2 or newer, for `import-from`.

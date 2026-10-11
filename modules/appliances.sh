@@ -225,7 +225,7 @@ appl_wifi5_images() {
 
 appl_wifi5_defaults() {
   A_NAME=wifi5 A_MEMORY=4096 A_CORES=2 A_SOCKETS=1 A_DISK=128G A_NICS=2
-  A_SERIAL=0 A_ONBOOT=1 A_START=1 A_TEMPLATE=0 A_NOTE=""
+  A_SERIAL=0 A_ONBOOT=0 A_START=1 A_TEMPLATE=0 A_NOTE=""
 }
 
 # --- OpenWrt (LXC) ------------------------------------------------------------------------
