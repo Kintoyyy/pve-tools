@@ -16,6 +16,8 @@ source "$PVE_TOOLS_DIR/lib/ui.sh"
 source "$PVE_TOOLS_DIR/modules/postinstall.sh"
 # shellcheck source=modules/guests.sh
 source "$PVE_TOOLS_DIR/modules/guests.sh"
+# shellcheck source=modules/appliances.sh
+source "$PVE_TOOLS_DIR/modules/appliances.sh"
 # shellcheck source=modules/backup.sh
 source "$PVE_TOOLS_DIR/modules/backup.sh"
 # shellcheck source=modules/maintenance.sh
@@ -71,6 +73,7 @@ main_menu() {
     choice=$(ui_menu "Main menu" "Choose a category:" \
       postinstall "Post-install setup (repos, nag, upgrade)" \
       guests      "VM / LXC management" \
+      appliances  "Appliance installers (MikroTik CHR, KiTifi, WiFi5)" \
       backup      "Backups & snapshots" \
       maint       "System maintenance" \
       passthrough "PCIe passthrough (IOMMU / VFIO)" \
@@ -79,6 +82,7 @@ main_menu() {
     case $choice in
       postinstall) postinstall_menu ;;
       guests)      guests_menu ;;
+      appliances)  appliances_menu ;;
       backup)      backup_menu ;;
       maint)       maintenance_menu ;;
       passthrough) passthrough_menu ;;

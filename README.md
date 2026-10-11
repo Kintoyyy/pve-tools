@@ -1,6 +1,6 @@
 # pve-tools
 
-A Bash toolkit for Proxmox VE hosts with a whiptail TUI. It covers post-install setup, VM/LXC management, backups and snapshots, PCIe passthrough, and routine maintenance. It supports **Proxmox VE 7, 8 and 9**.
+A Bash toolkit for Proxmox VE hosts with a whiptail TUI. It covers post-install setup, VM/LXC management, appliance VM installers, backups and snapshots, PCIe passthrough, and routine maintenance. It supports **Proxmox VE 7, 8 and 9**.
 
 ## Install
 
@@ -45,6 +45,18 @@ pve-tools version
 - Start all / shut down all, which follows the guests' boot order.
 - Container console (`pct enter`) or VM serial console (`qm terminal`).
 - View a guest's config.
+
+**Appliance installers**
+
+Each installer downloads a vendor disk image and builds a ready-to-run VM from it. A wizard walks through version, image (UEFI or BIOS), VM ID, name, storage, bridges, CPU/RAM/disk, and options (start at boot, start when done, convert to template).
+
+| Appliance | Source | Defaults |
+|---|---|---|
+| MikroTik RouterOS CHR | Official `download.mikrotik.com` image. The stable, long-term and testing versions are looked up live. | SeaBIOS, serial console, 8G disk, converted to a template |
+| KiTifi | Controller v2.0/v2.2 (MikroTik-based) or Standalone v1.3/v2.1/v2.2-beta (OpenWrt-based) | UEFI. 128G disk for the controller, 8G for standalone |
+| WiFi5 Soft vendo | Version list read live from `files.wifi5-soft.com`. Defaults to the newest non-rc release. | UEFI, 2 NICs, 128G disk, start at boot, started when done |
+
+All VMs use `virtio-scsi-single` with `iothread` and `discard`, `cpu host`, and virtio NICs. UEFI images get an EFI disk without pre-enrolled Secure Boot keys, so the unsigned images can boot. Downloads are cached in `/var/cache/pve-tools/images`, and the cache can be cleared from the menu. Requires PVE 7.2 or newer, for `import-from`.
 
 **Backups & snapshots**
 - Run `vzdump` on demand to any backup storage, in snapshot, suspend or stop mode.
@@ -96,7 +108,7 @@ pve-tools            entrypoint (CLI + main menu)
 install.sh           installer / uninstaller
 lib/common.sh        logging, PVE detection, run() / write_file() wrappers, guest helpers
 lib/ui.sh            whiptail wrappers and guest/storage pickers
-modules/*.sh         postinstall, guests, backup, maintenance, passthrough
+modules/*.sh         postinstall, guests, appliances, backup, maintenance, passthrough
 ```
 
 ## Development

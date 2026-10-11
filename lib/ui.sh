@@ -26,10 +26,13 @@ _ui_text_h() {
 _wt() { whiptail --backtitle "$UI_BACKTITLE" "$@"; }
 
 # ui_menu <title> <text> <tag> <desc> [<tag> <desc>...]
+# Set UI_DEFAULT_ITEM=<tag> to preselect an entry.
 ui_menu() {
   local title=$1 text=$2; shift 2
+  local -a extra=()
+  [[ -n ${UI_DEFAULT_ITEM:-} ]] && extra=(--default-item "$UI_DEFAULT_ITEM")
   _ui_size
-  _wt --title "$title" --menu "$text" "$UI_H" "$UI_W" "$UI_LIST" "$@" 3>&1 1>&2 2>&3
+  _wt --title "$title" "${extra[@]}" --menu "$text" "$UI_H" "$UI_W" "$UI_LIST" "$@" 3>&1 1>&2 2>&3
 }
 
 # ui_checklist <title> <text> <tag> <desc> <ON|OFF> [...] — one selected tag per line.
