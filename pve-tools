@@ -3,7 +3,7 @@
 # https://github.com/Kintoyyy/pve-tools
 set -uo pipefail
 
-PVE_TOOLS_VERSION="0.1.0"
+PVE_TOOLS_VERSION="0.2.0"
 PVE_TOOLS_REPO="${PVE_TOOLS_REPO:-Kintoyyy/pve-tools}"
 PVE_TOOLS_REF="${PVE_TOOLS_REF:-main}"
 PVE_TOOLS_DIR=$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")
@@ -20,6 +20,8 @@ source "$PVE_TOOLS_DIR/modules/guests.sh"
 source "$PVE_TOOLS_DIR/modules/backup.sh"
 # shellcheck source=modules/maintenance.sh
 source "$PVE_TOOLS_DIR/modules/maintenance.sh"
+# shellcheck source=modules/passthrough.sh
+source "$PVE_TOOLS_DIR/modules/passthrough.sh"
 
 usage() {
   cat <<EOF
@@ -29,6 +31,9 @@ Usage: pve-tools [--dry-run] [command]
 
 Commands:
   (none)       Open the interactive menu
+  passthrough  Open the PCIe passthrough menu directly
+  passthrough status
+               Print the passthrough status report (no TUI)
   update       Update pve-tools to the latest version
   uninstall    Remove pve-tools from this host
   version      Print the version
@@ -49,6 +54,7 @@ run_installer() {
 }
 
 self_update() {
+  pt_leave update # pending passthrough state does not survive the restart
   ui_terminal "Update pve-tools"
   if run_installer && ! is_dry_run; then
     msg_ok "Update complete. Restarting pve-tools..."
@@ -61,15 +67,13 @@ self_update() {
 
 main_menu() {
   local choice
-  UI_BACKTITLE="pve-tools $PVE_TOOLS_VERSION  |  Proxmox VE $PVE_VERSION on $PVE_NODE"
-  is_dry_run && UI_BACKTITLE+="  |  DRY-RUN"
-
   while true; do
     choice=$(ui_menu "Main menu" "Choose a category:" \
       postinstall "Post-install setup (repos, nag, upgrade)" \
       guests      "VM / LXC management" \
       backup      "Backups & snapshots" \
       maint       "System maintenance" \
+      passthrough "PCIe passthrough (IOMMU / VFIO)" \
       update      "Update pve-tools" \
       exit        "Exit") || break
     case $choice in
@@ -77,10 +81,12 @@ main_menu() {
       guests)      guests_menu ;;
       backup)      backup_menu ;;
       maint)       maintenance_menu ;;
+      passthrough) passthrough_menu ;;
       update)      self_update ;;
       exit)        break ;;
     esac
   done
+  pt_leave exit
   clear
 }
 
@@ -92,6 +98,9 @@ main() {
       -h | --help | help)   usage; exit 0 ;;
       -v | --version | version) echo "$PVE_TOOLS_VERSION"; exit 0 ;;
       update | uninstall)   cmd=$1 ;;
+      passthrough)
+        cmd=passthrough
+        if [[ ${2:-} == status ]]; then cmd="pt-status"; shift; fi ;;
       *)                    usage >&2; die "Unknown argument: $1" ;;
     esac
     shift
@@ -104,10 +113,15 @@ main() {
   PVE_TOOLS_TMP=$(mktemp -d /tmp/pve-tools.XXXXXX)
   trap 'rm -rf "$PVE_TOOLS_TMP"' EXIT
 
+  UI_BACKTITLE="pve-tools $PVE_TOOLS_VERSION  |  Proxmox VE $PVE_VERSION on $PVE_NODE"
+  is_dry_run && UI_BACKTITLE+="  |  DRY-RUN"
+
   case $cmd in
-    update)    run_installer ;;
-    uninstall) run bash "$PVE_TOOLS_DIR/install.sh" --uninstall ;;
-    tui)       main_menu ;;
+    update)      run_installer ;;
+    uninstall)   run bash "$PVE_TOOLS_DIR/install.sh" --uninstall ;;
+    pt-status)   pt_status_report ;;
+    passthrough) passthrough_menu; pt_leave exit; clear ;;
+    tui)         main_menu ;;
   esac
 }
 

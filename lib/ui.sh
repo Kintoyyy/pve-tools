@@ -33,13 +33,16 @@ ui_menu() {
 }
 
 # ui_checklist <title> <text> <tag> <desc> <ON|OFF> [...] — one selected tag per line.
-# Returns 1 when cancelled or nothing was selected.
+# Returns 1 when cancelled, or when nothing was selected unless UI_ALLOW_EMPTY=1.
 ui_checklist() {
   local title=$1 text=$2 out; shift 2
   _ui_size
   out=$(_wt --title "$title" --separate-output --checklist "$text" "$UI_H" "$UI_W" "$UI_LIST" "$@" 3>&1 1>&2 2>&3) || return 1
-  [[ -n $out ]] || return 1
-  printf '%s\n' "$out"
+  if [[ -n $out ]]; then
+    printf '%s\n' "$out"
+  elif [[ ${UI_ALLOW_EMPTY:-0} != 1 ]]; then
+    return 1
+  fi
 }
 
 # ui_radiolist <title> <text> <tag> <desc> <ON|OFF> [...]

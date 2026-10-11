@@ -171,6 +171,41 @@ apt_cleanup() {
   pause
 }
 
+# --- undo ----------------------------------------------------------------------------
+
+# Restore every file a previous pve-tools session changed (see backup_file).
+restore_menu() {
+  local d n files sel dir
+  local -a items=()
+  while read -r d; do
+    [[ -f $d/.manifest ]] || continue
+    n=$(wc -l <"$d/.manifest")
+    files=$(awk '{print $2}' "$d/.manifest" | xargs -rn1 basename | head -n3 | paste -sd, -)
+    items+=("${d##*/}" "$n change(s): $files")
+  done < <(find "$PVE_TOOLS_BACKUP_DIR" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -r)
+
+  if ((${#items[@]} == 0)); then
+    ui_msg "Undo" "No backup sessions in $PVE_TOOLS_BACKUP_DIR."
+    return
+  fi
+  sel=$(ui_menu "Undo" "Restore which session? (newest first)" "${items[@]}") || return
+  dir="$PVE_TOOLS_BACKUP_DIR/$sel"
+  ui_confirm "Undo" "This will restore:\n\n$(cat "$dir/.manifest")\n\n('saved' files are copied back, 'absent' files deleted, driverctl overrides removed.)\n\nProceed?" || return
+
+  ui_terminal "Restoring $sel"
+  restore_session "$dir"
+  msg_ok "Restored session $sel."
+  pause
+
+  # Boot-relevant files only take effect after an initramfs/bootloader rebuild.
+  if grep -Eq '^driverctl |/etc/modules$|/etc/modprobe\.d/|/etc/default/grub|/etc/kernel/cmdline' "$dir/.manifest"; then
+    # shellcheck disable=SC2034 # read by modules/passthrough.sh
+    PT_PENDING_INITRAMFS=1 PT_PENDING_BOOT=1 PT_PENDING_REBOOT=1
+    ui_yesno "Undo" "The restored files affect boot (modules, kernel cmdline or driver bindings).\n\nRebuild initramfs and bootloader config now?" &&
+      pt_apply_changes
+  fi
+}
+
 maintenance_menu() {
   local choice
   while true; do
@@ -180,6 +215,7 @@ maintenance_menu() {
       node    "Node / cluster info" \
       lxcupd  "Update packages inside containers" \
       aptcln  "APT autoremove & clean" \
+      undo    "Undo changes from a backup session" \
       back    "Back") || return
     case $choice in
       kernels) kernel_cleanup ;;
@@ -187,6 +223,7 @@ maintenance_menu() {
       node)    ui_cmd_output "Node info" node_report ;;
       lxcupd)  lxc_update_all ;;
       aptcln)  apt_cleanup ;;
+      undo)    restore_menu ;;
       back)    return ;;
     esac
   done

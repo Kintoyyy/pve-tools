@@ -1,6 +1,6 @@
 # pve-tools
 
-A Bash toolkit for Proxmox VE hosts with a whiptail TUI. It covers post-install setup, VM/LXC management, backups and snapshots, and routine maintenance. It supports **Proxmox VE 7, 8 and 9**.
+A Bash toolkit for Proxmox VE hosts with a whiptail TUI. It covers post-install setup, VM/LXC management, backups and snapshots, PCIe passthrough, and routine maintenance. It supports **Proxmox VE 7, 8 and 9**.
 
 ## Install
 
@@ -13,7 +13,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/Kintoyyy/pve-tools/main/
 This installs to `/opt/pve-tools` and links the `pve-tools` command into `/usr/local/bin`. To install a specific branch, tag or commit, set `PVE_TOOLS_REF`:
 
 ```bash
-PVE_TOOLS_REF=v0.1.0 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Kintoyyy/pve-tools/main/install.sh)"
+PVE_TOOLS_REF=v0.2.0 bash -c "$(curl -fsSL https://raw.githubusercontent.com/Kintoyyy/pve-tools/main/install.sh)"
 ```
 
 To install from a local clone, run `./install.sh --local`.
@@ -23,6 +23,8 @@ To install from a local clone, run `./install.sh --local`.
 ```
 pve-tools              # open the menu
 pve-tools --dry-run    # browse the menu; changes are printed, not executed
+pve-tools passthrough  # open the PCIe passthrough menu directly
+pve-tools passthrough status   # print the passthrough status report (no TUI)
 pve-tools update       # update to the latest version
 pve-tools uninstall    # remove pve-tools
 pve-tools version
@@ -56,11 +58,26 @@ pve-tools version
 - Node and cluster info.
 - Update packages inside running containers (Debian/Ubuntu, Alpine, Fedora/RHEL family, Arch, openSUSE).
 - `apt autoremove` and `apt clean`.
+- Undo: restore every file changed in a previous pve-tools session.
+
+**PCIe passthrough**
+- Status and preflight report: IOMMU state, IRQ remapping, VFIO modules, devices on vfio-pci, devices with no driver, and the passthrough modprobe configs.
+- Enable IOMMU on the kernel cmdline, for GRUB (`/etc/default/grub`) or systemd-boot (`/etc/kernel/cmdline`). Options: `iommu=pt`, ACS override, `relax_rmrr`. A before/after preview is shown.
+- Add the VFIO modules to `/etc/modules`. On kernel 6.2+, `vfio_virqfd` is handled correctly.
+- Bind devices to vfio-pci in one of three ways: per-device with `driverctl`, by `vendor:device` IDs, or by blacklisting the driver. It warns when:
+  - a selected NIC carries host traffic;
+  - other devices share the IOMMU group;
+  - an ID or blacklist rule would also capture devices you didn't select.
+- Toggle `allow_unsafe_interrupts` and view the IOMMU groups.
+- Repair EFI boot: initialize the ESP with `proxmox-boot-tool`, or switch from `grub-pc` to `grub-efi`.
+- Recover a device that has no driver (e.g. ixgbe with an unsupported SFP+ module).
+- HPE ProLiant RMRR slot exclusion with `conrep`.
+- Apply changes (initramfs and bootloader refresh). Pending changes are flagged in the menu, and you're prompted to apply them on exit.
 
 ## Safety
 
 - Every command that changes the system goes through a single wrapper. `--dry-run` uses it to print the commands without running them.
-- Before any system file is edited, a copy is saved under `/var/backups/pve-tools/`.
+- Each run is a backup session. Before a file is first changed, its original is saved under `/var/backups/pve-tools/<session>/`, and new files are recorded so they can be removed. **Maintenance → Undo** (also in the passthrough menu) restores a whole session.
 - Every action is logged to `/var/log/pve-tools.log`.
 - Destructive actions (stop, rollback, delete, prune, kernel purge) default to **No**.
 
@@ -79,7 +96,7 @@ pve-tools            entrypoint (CLI + main menu)
 install.sh           installer / uninstaller
 lib/common.sh        logging, PVE detection, run() / write_file() wrappers, guest helpers
 lib/ui.sh            whiptail wrappers and guest/storage pickers
-modules/*.sh         postinstall, guests, backup, maintenance
+modules/*.sh         postinstall, guests, backup, maintenance, passthrough
 ```
 
 ## Development

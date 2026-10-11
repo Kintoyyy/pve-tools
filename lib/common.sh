@@ -34,8 +34,8 @@ pause() {
 }
 
 # --- mutating commands ------------------------------------------------------
-# Every command that changes the system goes through run/write_file/backup_file,
-# so --dry-run can show exactly what would happen.
+# Every command that changes the system goes through run/write_file/append_line/
+# remove_file, so --dry-run can show exactly what would happen.
 
 run() {
   _log RUN "$*"
@@ -44,14 +44,6 @@ run() {
     return 0
   fi
   "$@"
-}
-
-# backup_file <path> — copy a system file to $PVE_TOOLS_BACKUP_DIR before editing it.
-backup_file() {
-  local src=$1 dest
-  [[ -f $src ]] || return 0
-  dest="$PVE_TOOLS_BACKUP_DIR/$(tr '/' '_' <<<"${src#/}").$(date +%Y%m%d-%H%M%S)"
-  run mkdir -p "$PVE_TOOLS_BACKUP_DIR" && run cp -a "$src" "$dest"
 }
 
 # write_file <path> [mode] — write stdin to <path>, backing up any existing file.
@@ -65,6 +57,66 @@ write_file() {
   fi
   backup_file "$path"
   printf '%s\n' "$content" >"$path" && chmod "$mode" "$path"
+}
+
+# append_line <path> <line> — append <line> unless the file already has it.
+append_line() {
+  grep -qxF -- "$2" "$1" 2>/dev/null && return 0
+  _log APPEND "'$2' >> $1"
+  if is_dry_run; then
+    printf '%s[dry-run]%s append %q to %s\n' "$C_YELLOW" "$C_RESET" "$2" "$1"
+    return 0
+  fi
+  backup_file "$1"
+  printf '%s\n' "$2" >>"$1"
+}
+
+remove_file() {
+  [[ -e $1 ]] || return 0
+  backup_file "$1"
+  run rm -f "$1"
+}
+
+# --- backup sessions ----------------------------------------------------------
+# Each pve-tools run is one backup session. The first time a file is touched, its
+# original is copied to $PVE_TOOLS_SESSION_DIR/<path> (or recorded as absent) and
+# listed in .manifest, so restore_session can undo the whole run later.
+
+PVE_TOOLS_SESSION_DIR="$PVE_TOOLS_BACKUP_DIR/$(date +%Y%m%d-%H%M%S)"
+
+# manifest_add <type> <arg> — types: saved <path>, absent <path>, driverctl <bdf>.
+manifest_add() {
+  is_dry_run && return 0
+  mkdir -p "$PVE_TOOLS_SESSION_DIR" && printf '%s\n' "$*" >>"$PVE_TOOLS_SESSION_DIR/.manifest"
+}
+
+# backup_file <path> — snapshot <path> once per session before it is changed.
+backup_file() {
+  local f=$1 manifest="$PVE_TOOLS_SESSION_DIR/.manifest"
+  is_dry_run && return 0
+  if [[ -f $manifest ]] &&
+    awk -v f="$f" '{ t = $1; p = substr($0, length($1) + 2) } (t == "saved" || t == "absent") && p == f { x = 1 } END { exit !x }' "$manifest"; then
+    return 0
+  fi
+  if [[ -e $f ]]; then
+    mkdir -p "$PVE_TOOLS_SESSION_DIR$(dirname "$f")" && cp -a "$f" "$PVE_TOOLS_SESSION_DIR$f" || return 1
+    manifest_add saved "$f"
+  else
+    manifest_add absent "$f"
+  fi
+  _log BACKUP "$f"
+}
+
+# restore_session <dir> — undo every change recorded in <dir>/.manifest.
+restore_session() {
+  local dir=$1 type path
+  while read -r type path; do
+    case $type in
+      saved)     run cp -a "$dir$path" "$path" ;;
+      absent)    run rm -f "$path" ;;
+      driverctl) command -v driverctl >/dev/null 2>&1 && run driverctl unset-override "$path" ;;
+    esac
+  done <"$dir/.manifest"
 }
 
 # --- host checks ------------------------------------------------------------
