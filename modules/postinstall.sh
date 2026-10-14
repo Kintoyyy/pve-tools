@@ -36,9 +36,12 @@ ceph_release() {
   esac
 }
 
+# Step title with a "[n/total]" counter; PI_STEP/PI_TOTAL are set by postinstall_menu.
+pi_title() { msg_title "[${PI_STEP:-1}/${PI_TOTAL:-1}] $*"; }
+
 pi_disable_enterprise() {
   local f found=0
-  msg_title "Disable enterprise repositories"
+  pi_title "Disable enterprise repositories"
   for f in "$APT_DIR"/*.list "$APT_DIR"/*.sources; do
     grep -qs 'enterprise.proxmox.com' "$f" || continue
     found=1
@@ -55,7 +58,7 @@ pi_disable_enterprise() {
 }
 
 pi_add_no_subscription() {
-  msg_title "Add pve-no-subscription repository"
+  pi_title "Add pve-no-subscription repository"
   if apt_repo_enabled 'pve-no-subscription'; then
     msg_ok "pve-no-subscription is already enabled."
     return
@@ -79,7 +82,7 @@ EOF
 pi_add_ceph_no_subscription() {
   local rel
   rel=$(ceph_release)
-  msg_title "Add Ceph $rel no-subscription repository"
+  pi_title "Add Ceph $rel no-subscription repository"
   if apt_repo_enabled "download.proxmox.com/debian/ceph-$rel"; then
     msg_ok "Ceph $rel no-subscription is already enabled."
     return
@@ -101,7 +104,7 @@ EOF
 }
 
 pi_remove_nag() {
-  msg_title "Remove subscription nag"
+  pi_title "Remove subscription nag"
   # Patch script is idempotent; the apt hook re-applies it after widget-toolkit upgrades.
   write_file "$NAG_SCRIPT" 0755 <<'EOF'
 #!/bin/sh
@@ -113,16 +116,22 @@ sed -E -i "s/(data\.status\.toLowerCase\(\)[[:space:]]*)!==[[:space:]]*(['\"])ac
 grep -q NoMoreNagging "$JS" || echo "pve-tools: subscription check not found in $JS (UI changed?)" >&2
 exit 0
 EOF
+  msg_ok "Installed patch script $NAG_SCRIPT"
   write_file "$NAG_HOOK" <<EOF
 DPkg::Post-Invoke { "if [ -x $NAG_SCRIPT ]; then $NAG_SCRIPT; fi"; };
 EOF
+  msg_ok "Installed apt hook $NAG_HOOK (re-applies the patch after upgrades)"
+  msg_info "Patching proxmoxlib.js..."
   run "$NAG_SCRIPT"
-  run systemctl restart pveproxy.service
+  # Reload, not restart: a restart drops open connections, which kills the web UI
+  # shell this script may be running in. Reload leaves existing connections alone.
+  msg_info "Reloading pveproxy..."
+  run systemctl reload pveproxy.service
   msg_ok "Subscription nag removed. Clear your browser cache (Ctrl+Shift+R) to see it."
 }
 
 pi_disable_ha() {
-  msg_title "Disable HA services"
+  pi_title "Disable HA services"
   if is_clustered; then
     msg_warn "This node is part of a cluster; leaving HA/corosync alone."
     return
@@ -132,9 +141,10 @@ pi_disable_ha() {
 }
 
 pi_upgrade() {
-  msg_title "Upgrade system"
+  pi_title "Upgrade system"
   run apt-get update || { msg_error "apt-get update failed; check your repositories."; return 1; }
-  run env DEBIAN_FRONTEND=noninteractive apt-get -y \
+  # Progress-Fancy draws apt's "Progress: [ 42%]" bar at the bottom of the terminal.
+  run env DEBIAN_FRONTEND=noninteractive apt-get -y -o Dpkg::Progress-Fancy=1 \
     -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold dist-upgrade
 }
 
@@ -147,7 +157,7 @@ kernel_reboot_needed() {
 
 postinstall_menu() {
   local -a items steps
-  local out step
+  local out step PI_STEP=0 PI_TOTAL
 
   items=(
     enterprise "Disable enterprise repositories"            ON
@@ -164,11 +174,13 @@ postinstall_menu() {
 
   if [[ " ${steps[*]} " == *" ha "* ]] &&
     ! ui_confirm "Disable HA" "Disabling HA stops pve-ha-lrm, pve-ha-crm and corosync.\nOnly do this on a standalone node you will not join to a cluster.\n\nContinue?"; then
-    steps=("${steps[@]/ha/}")
+    mapfile -t steps < <(printf '%s\n' "${steps[@]}" | grep -vx ha)
   fi
+  PI_TOTAL=${#steps[@]}
 
   ui_terminal "Post-install setup"
   for step in "${steps[@]}"; do
+    ((++PI_STEP))
     case $step in
       enterprise) pi_disable_enterprise ;;
       nosub)      pi_add_no_subscription ;;
